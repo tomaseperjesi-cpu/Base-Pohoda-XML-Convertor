@@ -2,6 +2,7 @@ import streamlit as st
 import xml.etree.ElementTree as ET
 from datetime import datetime
 import io
+import re
 
 # ==========================================
 # KONFIGURÁCIA A MENNÉ PRIESTORY POHODY
@@ -31,7 +32,6 @@ def transform_xml(file_bytes, rada):
     pack_id = f"{rada}_{now.day:02d}_{month_map[now.month]}_{now.year}_{now.hour:02d}_{now.minute:02d}"
 
     try:
-        # Parsujeme XML priamo z pamäte
         tree = ET.parse(file_bytes)
         root = tree.getroot()
     except ET.ParseError:
@@ -52,8 +52,21 @@ def transform_xml(file_bytes, rada):
         old_header = old_invoice.find('inv:invoiceHeader', NS)
         if old_header is None: continue
         
+        # --- OPRAVA: Formátovanie čísla faktúry (napr. 2026VFB2 -> 2026VFB0002) ---
         inv_number_elem = old_header.find('inv:number/typ:numberRequested', NS)
-        inv_number = inv_number_elem.text if inv_number_elem is not None else "Neznáme"
+        inv_number = "Neznáme"
+        if inv_number_elem is not None and inv_number_elem.text:
+            orig_num = inv_number_elem.text.strip()
+            # Regulárny výraz oddelí textový začiatok od čísla na konci
+            match = re.match(r"^(.*?)(\d+)$", orig_num)
+            if match:
+                prefix = match.group(1)
+                num_part = match.group(2)
+                inv_number = f"{prefix}{num_part.zfill(4)}" # Doplní nuly na 4 znaky
+                inv_number_elem.text = inv_number # Aktualizujeme text priamo v zdroji
+            else:
+                inv_number = orig_num
+        # -------------------------------------------------------------------------
 
         # --- KONTROLA FIRMY A IČO (Validátor) ---
         partner = old_header.find('.//typ:address', NS)
@@ -125,8 +138,6 @@ def transform_xml(file_bytes, rada):
             old_detail = old_invoice.find('inv:invoiceDetail', NS)
             if old_detail is not None:
                 new_detail = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceDetail')
-                # Pre jednoduchosť tu nechávame štruktúru pre rozpad DPH
-                # (V reálnej aplikácii by tu bol cyklus cez položky z Base.com a výpočet DPH)
                 
                 # Riadok 1: Tovar DE (Základ)
                 item1 = ET.SubElement(new_detail, f'{{{NS["inv"]}}}invoiceItem')
@@ -161,7 +172,8 @@ def transform_xml(file_bytes, rada):
                 f_price = float(f_price_node.text) if f_price_node is not None else 0.0
                 
                 hc = ET.SubElement(new_summary, f'{{{NS["inv"]}}}homeCurrency')
-                ET.SubElement(hc, f'{{{NS["typ"]}}}priceNone').text = f"{f_price / rate:.2f}"
+                # --- OPRAVA: Prepočet teraz korektne násobí (Suma v EUR = Suma v Cudzej Mene * Kurz) ---
+                ET.SubElement(hc, f'{{{NS["typ"]}}}priceNone').text = f"{f_price * rate:.2f}"
                 
                 fc = ET.SubElement(new_summary, f'{{{NS["inv"]}}}foreignCurrency')
                 fc.append(foreign_curr.find('typ:currency', NS))
@@ -203,8 +215,9 @@ with st.sidebar:
     
     st.markdown("---")
     st.info("**Pravidlá aplikované skriptom:**\n"
-            "* **IČO:** 57039607\n"
+            "* **Číslovanie:** Dopĺňanie na 4 cifry (2026VFB0002)\n"
             "* **Kódovanie:** Windows-1250\n"
+            "* **Kurz:** EUR = Cena * Kurz zo súboru\n"
             "* **Validácia:** Kontrola IČO pri vyplnenej firme.")
 
 # --- MAIN AREA ---
@@ -215,10 +228,8 @@ if uploaded_file is not None:
     
     if st.button("🚀 Spustiť transformáciu", type="primary"):
         with st.spinner('Spracovávam faktúry...'):
-            # Prevedieme nahratý súbor na BytesIO
             file_bytes = io.BytesIO(uploaded_file.getvalue())
             
-            # Spustenie logiky
             xml_data, errors, count = transform_xml(file_bytes, zvolena_rada)
             
             if xml_data is None:
