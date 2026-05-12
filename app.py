@@ -1,6 +1,7 @@
 import streamlit as st
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import io
 import re
 
@@ -36,7 +37,10 @@ if 'out_filename' not in st.session_state:
 # HLAVNÁ TRANSFORMAČNÁ FUNKCIA
 # ==========================================
 def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, payment_type, sym_const):
-    now = datetime.now()
+    # Nastavenie slovenskej časovej zóny
+    tz_sk = ZoneInfo("Europe/Bratislava")
+    now = datetime.now(tz_sk)
+    
     month_map = {1:'JAN', 2:'FEB', 3:'MAR', 4:'APR', 5:'MAY', 6:'JUN', 
                  7:'JUL', 8:'AUG', 9:'SEP', 10:'OCT', 11:'NOV', 12:'DEC'}
     
@@ -48,7 +52,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
     except ET.ParseError:
         return None, ["Chyba parsovania: Nahratý súbor nie je platný XML dokument."], 0, pack_id
 
-    # Obálka (Menné priestory sa pridajú automaticky vďaka ET.register_namespace)
+    # Obálka
     new_root = ET.Element(f'{{{NS["dat"]}}}dataPack', {
         'version': '2.0', 'id': pack_id, 'ico': MY_ICO, 
         'application': 'import', 'note': 'import'
@@ -94,8 +98,6 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         new_invoice = ET.SubElement(new_item, f'{{{NS["inv"]}}}invoice', {'version': '2.0'})
         new_header = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceHeader')
         
-        # (Už žiadne manuálne nastavovanie xmlns do hlavičky)
-
         # -- PORADIE ELEMENTOV PODĽA POHODA XSD --
         ET.SubElement(new_header, f'{{{NS["inv"]}}}invoiceType').text = 'issuedInvoice'
         new_header.append(old_header.find('inv:number', NS))
@@ -107,14 +109,14 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
             date_obj = datetime.strptime(date_val, "%Y-%m-%d")
             date_due_val = (date_obj + timedelta(days=due_days)).strftime("%Y-%m-%d")
         except:
-            date_due_val = date_val # Ak zlyhá formátovanie, ostane rovnaký
+            date_due_val = date_val 
             
         ET.SubElement(new_header, f'{{{NS["inv"]}}}date').text = date_val
         ET.SubElement(new_header, f'{{{NS["inv"]}}}dateTax').text = date_val
         ET.SubElement(new_header, f'{{{NS["inv"]}}}dateAccounting').text = date_val
         ET.SubElement(new_header, f'{{{NS["inv"]}}}dateDue').text = date_due_val
 
-        # 4. Účtovanie, DPH a KV DPH (Novinka)
+        # 4. Účtovanie, DPH a KV DPH
         acc = ET.SubElement(new_header, f'{{{NS["inv"]}}}accounting')
         class_vat = ET.SubElement(new_header, f'{{{NS["inv"]}}}classificationVAT')
         
@@ -135,13 +137,13 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         else:
             ET.SubElement(new_header, f'{{{NS["inv"]}}}text').text = 'Predaj tovaru - Nemecko'
 
-        # 5. Adresa odberateľa (Vyčistenie od prázdneho IČO/DIČ)
+        # 5. Adresa odberateľa
         old_address = old_header.find('.//typ:address', NS)
         if old_address is not None:
             for empty_tag in ['ico', 'dic', 'icDph']:
                 elem = old_address.find(f'typ:{empty_tag}', NS)
                 if elem is not None and (not elem.text or not elem.text.strip()):
-                    old_address.remove(elem) # Vymažeme prázdne značky
+                    old_address.remove(elem)
             ET.SubElement(new_header, f'{{{NS["inv"]}}}partnerIdentity').append(old_address)
 
         # 6. Naša Identita
