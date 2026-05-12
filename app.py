@@ -67,6 +67,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         # 1. Číslo faktúry (formátovanie na 4 cifry)
         inv_number_elem = old_header.find('inv:number/typ:numberRequested', NS)
         current_suffix = ""
+        inv_number = "Neznáme"
         if inv_number_elem is not None and inv_number_elem.text:
             orig_num = inv_number_elem.text.strip()
             match = re.match(r"^(.*?)(\d+)$", orig_num)
@@ -81,5 +82,33 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
             else:
                 inv_number = orig_num
 
-        # 2. Kontrola firmy bez IČO a neúplnej adresy
+        # 2. Kontrola firmy bez IČO
         partner = old_header.find('.//typ:address', NS)
+        if partner is not None:
+            comp = partner.find('typ:company', NS)
+            ico_e = partner.find('typ:ico', NS)
+            if comp is not None and comp.text and comp.text.strip():
+                if ico_e is None or not ico_e.text or not ico_e.text.strip():
+                    invalid_invoices.append(f"FA {inv_number} (Firma: {comp.text})")
+
+        # 3. Tvorba položky dataPackItem
+        item_id = f"{pack_id} ({i:03d})"
+        new_item = ET.SubElement(new_root, f'{{{NS["dat"]}}}dataPackItem', {'version': '2.0', 'id': item_id})
+        new_invoice = ET.SubElement(new_item, f'{{{NS["inv"]}}}invoice', {'version': '2.0', 'xmlns:inv': NS['inv']})
+        new_header = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceHeader', {'xmlns:typ': NS['typ']})
+        
+        # -- Poradie elementov v hlavičke --
+        ET.SubElement(new_header, f'{{{NS["inv"]}}}invoiceType').text = 'issuedInvoice'
+        new_header.append(old_header.find('inv:number', NS))
+        new_header.append(old_header.find('inv:symVar', NS))
+        
+        date_val = old_header.find('inv:date', NS).text
+        try:
+            date_obj = datetime.strptime(date_val, "%Y-%m-%d")
+            date_due_val = (date_obj + timedelta(days=due_days)).strftime("%Y-%m-%d")
+        except:
+            date_due_val = date_val
+            
+        ET.SubElement(new_header, f'{{{NS["inv"]}}}date').text = date_val
+        ET.SubElement(new_header, f'{{{NS["inv"]}}}dateTax').text = date_val
+        ET.SubElement(new_header, f'{{{NS["inv"]}}}dateAccounting').text = date_val
