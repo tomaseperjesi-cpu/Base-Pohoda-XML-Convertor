@@ -133,7 +133,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         # Partner
         if partner is not None:
             has_ico_real = False
-            for t in ['ico', 'dic', 'icDph']:
+            for t in ['company', 'ico', 'dic', 'icDph']:
                 e = partner.find(f'typ:{t}', NS)
                 if e is not None:
                     if not e.text or not e.text.strip(): partner.remove(e)
