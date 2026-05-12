@@ -33,7 +33,7 @@ if 'out_filename' not in st.session_state:
 # HLAVNÁ TRANSFORMAČNÁ FUNKCIA
 # ==========================================
 def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, payment_type, sym_const):
-    # Nastavenie slovenskej časovej zóny (11:50 namiesto 09:50)
+    # Nastavenie slovenskej časovej zóny
     tz_sk = ZoneInfo("Europe/Bratislava")
     now = datetime.now(tz_sk)
     
@@ -147,13 +147,21 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         text_val = 'Tržby z predaja tovaru' if rada == 'VFB' else 'Predaj tovaru - Nemecko'
         ET.SubElement(new_header, f'{{{NS["inv"]}}}text').text = text_val
 
-        # Adresa odberateľa (očistená)
+        # Adresa odberateľa (očistená a inteligentný linkToAddress)
         old_address = old_header.find('.//typ:address', NS)
         if old_address is not None:
+            has_valid_ico = False
             for tag in ['ico', 'dic', 'icDph']:
                 e = old_address.find(f'typ:{tag}', NS)
-                if e is not None and (not e.text or not e.text.strip()):
-                    old_address.remove(e)
+                if e is not None:
+                    if not e.text or not e.text.strip():
+                        old_address.remove(e) # Odstráni prázdne tagy
+                    elif tag == 'ico':
+                        has_valid_ico = True # Ak prežilo neprázdne IČO
+            
+            # Logika ukladania do adresára Pohody
+            old_address.set('linkToAddress', 'true' if has_valid_ico else 'false')
+            
             ET.SubElement(new_header, f'{{{NS["inv"]}}}partnerIdentity').append(old_address)
 
         # Naša Identita
