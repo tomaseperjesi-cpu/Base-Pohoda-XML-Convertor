@@ -6,6 +6,11 @@ import io
 import re
 
 # ==========================================
+# 1. NASTAVENIE STRÁNKY (MUSÍ BYŤ PRVÉ!)
+# ==========================================
+st.set_page_config(page_title="Pohoda XML Transform", page_icon="📝", layout="wide")
+
+# ==========================================
 # KONFIGURÁCIA A MENNÉ PRIESTORY POHODY
 # ==========================================
 MY_ICO = "57039607"
@@ -18,6 +23,7 @@ NS = {
 for prefix, uri in NS.items():
     ET.register_namespace(prefix, uri)
 
+# Inicializácia Session State pre Streamlit
 if 'transformed_xml' not in st.session_state:
     st.session_state.transformed_xml = None
 if 'errors' not in st.session_state:
@@ -124,32 +130,139 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         text_v = 'Tržby z predaja tovaru' if rada == 'VFB' else 'Predaj tovaru - Nemecko'
         ET.SubElement(new_header, f'{{{NS["inv"]}}}text').text = text_v
 
-        # 4. Partner (Adresa a daňové údaje)
+        # 4. Partner
         partner = old_header.find('.//typ:address', NS)
         if partner is not None:
             has_ico_real = False
             missing_addr_fields = []
             
-            # A. Kontrola bežnej adresy (tagy NEODSTRAŇUJEME, iba zbierame upozornenia)
             for t in ['name', 'city', 'street', 'zip', 'country']:
                 e = partner.find(f'typ:{t}', NS)
                 if e is None or not e.text or not e.text.strip():
                     missing_addr_fields.append(t)
 
-            # B. Odstraňovanie prázdnych firemných/daňových polí
             for t in ['company', 'ico', 'dic', 'icDph']:
                 e = partner.find(f'typ:{t}', NS)
                 if e is not None:
                     txt = e.text.strip() if e.text else ""
                     if not txt:
-                        partner.remove(e) # Odstránime len prázdnu firmu alebo IČO/DIČ
+                        partner.remove(e)
                     elif t == 'ico':
                         has_ico_real = True
             
-            # Upozornenie na vyplnenú firmu bez IČO
             comp_e = partner.find('typ:company', NS)
             ico_e = partner.find('typ:ico', NS)
             if comp_e is not None and ico_e is None:
                 invalid_msgs.append(f"FA {inv_number}: Firma '{comp_e.text}' nemá IČO.")
 
-            # Upozornenie na chýbajúce základné údaje z
+            if missing_addr_fields:
+                transl = {'name': 'Meno', 'city': 'Mesto', 'street': 'Ulica', 'zip': 'PSČ', 'country': 'Krajina'}
+                miss_sk = [transl.get(x, x) for x in missing_addr_fields]
+                invalid_msgs.append(f"Upozornenie FA {inv_number}: Neúplná adresa (chýba: {', '.join(miss_sk)}).")
+
+            partner.set('linkToAddress', 'true' if has_ico_real else 'false')
+            ET.SubElement(new_header, f'{{{NS["inv"]}}}partnerIdentity').append(partner)
+
+        # Identita
+        my_id = ET.SubElement(ET.SubElement(new_header, f'{{{NS["inv"]}}}myIdentity'), f'{{{NS["typ"]}}}address')
+        ET.SubElement(my_id, f'{{{NS["typ"]}}}company').text = 'EPPO BRANDS s. r. o.'
+        ET.SubElement(my_id, f'{{{NS["typ"]}}}city').text = 'Zvolen'
+        ET.SubElement(my_id, f'{{{NS["typ"]}}}street').text = 'Tulská'
+        ET.SubElement(my_id, f'{{{NS["typ"]}}}number').text = '9386/6B'
+        ET.SubElement(my_id, f'{{{NS["typ"]}}}zip').text = '960 01'
+        ET.SubElement(my_id, f'{{{NS["typ"]}}}ico').text = '57039607'
+        ET.SubElement(my_id, f'{{{NS["typ"]}}}dic').text = '2122546481'
+        ET.SubElement(my_id, f'{{{NS["typ"]}}}icDph').text = 'SK2122546481'
+
+        # Banka a platba
+        pt_n = ET.SubElement(new_header, f'{{{NS["inv"]}}}paymentType')
+        ET.SubElement(pt_n, f'{{{NS["typ"]}}}ids').text = payment_type
+        ET.SubElement(pt_n, f'{{{NS["typ"]}}}paymentType').text = 'draft'
+        bnk = ET.SubElement(new_header, f'{{{NS["inv"]}}}account')
+        ET.SubElement(bnk, f'{{{NS["typ"]}}}ids').text = bank_ids
+        ET.SubElement(bnk, f'{{{NS["typ"]}}}accountNo').text = bank_acc
+        ET.SubElement(bnk, f'{{{NS["typ"]}}}bankCode').text = bank_code
+        ET.SubElement(new_header, f'{{{NS["inv"]}}}symConst').text = sym_const
+
+        # Likvidácia
+        old_sum = old_invoice.find('inv:invoiceSummary', NS)
+        h_sum, f_sum = 0.0, 0.0
+        is_f, c_ids, c_rate = False, "EUR", 1.0
+
+        if old_sum is not None:
+            fc_e = old_sum.find('inv:foreignCurrency', NS)
+            if fc_e is not None:
+                is_f = True
+                c_ids = fc_e.find('typ:currency/typ:ids', NS).text
+                c_rate = float(fc_e.find('typ:rate', NS).text)
+                f_sum = float(old_invoice.find('.//inv:foreignCurrency/typ:priceSum', NS).text)
+                h_sum = round(f_sum * c_rate, 2)
+            else:
+                h_sum_el = old_invoice.find('.//inv:homeCurrency/typ:priceSum', NS)
+                h_sum = float(h_sum_el.text) if h_sum_el is not None else 0.0
+
+        liq = ET.SubElement(new_header, f'{{{NS["inv"]}}}liquidation')
+        ET.SubElement(liq, f'{{{NS["typ"]}}}amountHome').text = f"{h_sum:.2f}"
+        if is_f: ET.SubElement(liq, f'{{{NS["typ"]}}}amountForeign').text = f"{f_sum:.2f}"
+
+        ET.SubElement(new_header, f'{{{NS["inv"]}}}lock2').text = 'false'
+        ET.SubElement(new_header, f'{{{NS["inv"]}}}markRecord').text = 'false'
+
+        # Položky VFD
+        if rada == 'VFD':
+            det = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceDetail')
+            vat_p = round(f_sum - (f_sum / 1.19), 2)
+            base_p = round(f_sum - vat_p, 2)
+            for t, val, a_id in [('Tovar DE', base_p, 'pred.tov.DE'), ('DPH DE', vat_p, 'DPH.tov.DE')]:
+                it = ET.SubElement(det, f'{{{NS["inv"]}}}invoiceItem')
+                ET.SubElement(it, f'{{{NS["inv"]}}}text').text = t
+                ET.SubElement(it, f'{{{NS["inv"]}}}quantity').text = '1'
+                ET.SubElement(it, f'{{{NS["inv"]}}}rateVAT').text = 'none'
+                curr = ET.SubElement(it, f'{{{NS["inv"]}}}homeCurrency' if not is_f else f'{{{NS["inv"]}}}foreignCurrency')
+                ET.SubElement(curr, f'{{{NS["typ"]}}}unitPrice').text = f"{val:.2f}"
+                ET.SubElement(curr, f'{{{NS["typ"]}}}price').text = f"{val:.2f}"
+                ET.SubElement(curr, f'{{{NS["typ"]}}}priceSum').text = f"{val:.2f}"
+                ET.SubElement(ET.SubElement(it, f'{{{NS["inv"]}}}accounting'), f'{{{NS["typ"]}}}ids').text = a_id
+
+        # Sumár
+        ns_sum = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceSummary', {'xmlns:typ': NS['typ']})
+        ET.SubElement(ns_sum, f'{{{NS["inv"]}}}roundingDocument').text = 'none'
+        ET.SubElement(ns_sum, f'{{{NS["inv"]}}}roundingVAT').text = 'none'
+        hc = ET.SubElement(ns_sum, f'{{{NS["inv"]}}}homeCurrency')
+        ET.SubElement(hc, f'{{{NS["typ"]}}}priceNone').text = f"{h_sum:.2f}"
+        for tag in ['priceLow', 'priceLowVAT', 'priceLowSum', 'priceHigh', 'priceHighVAT', 'priceHighSum', 'price3', 'price3VAT', 'price3Sum']:
+            ET.SubElement(hc, f'{{{NS["typ"]}}}{tag}').text = '0'
+        ET.SubElement(ET.SubElement(hc, f'{{{NS["typ"]}}}round'), f'{{{NS["typ"]}}}priceRound').text = '0'
+
+        if is_f:
+            fc = ET.SubElement(ns_sum, f'{{{NS["inv"]}}}foreignCurrency')
+            tc = ET.SubElement(fc, f'{{{NS["typ"]}}}currency')
+            ET.SubElement(tc, f'{{{NS["typ"]}}}ids').text = c_ids
+            ET.SubElement(fc, f'{{{NS["typ"]}}}rate').text = str(c_rate)
+            ET.SubElement(fc, f'{{{NS["typ"]}}}amount').text = '1'
+            ET.SubElement(fc, f'{{{NS["typ"]}}}priceSum').text = f"{f_sum:.2f}"
+            ET.SubElement(ET.SubElement(fc, f'{{{NS["typ"]}}}round'), f'{{{NS["typ"]}}}priceRound').text = '0'
+        
+        processed_count += 1
+
+    range_tx = f"{first_inv_suffix}-{last_inv_suffix}" if first_inv_suffix else ""
+    ts = f"{now.day:02d}_{month_map[now.month]}_{now.year}_{now.hour:02d}_{now.minute:02d}"
+    out_n = f"{rada}{range_tx}_{ts}.xml"
+
+    out_b = io.BytesIO()
+    ET.ElementTree(new_root).write(out_b, encoding='Windows-1250', xml_declaration=True)
+    return out_b.getvalue(), invalid_msgs, processed_count, pack_id, out_n
+
+# ==========================================
+# STREAMLIT UI
+# ==========================================
+st.title("📦 Base.com -> Pohoda XML Transformátor")
+
+with st.sidebar:
+    st.header("⚙️ Nastavenia")
+    r_sel = st.radio("Dokladová rada:", ('VFB', 'VFD'))
+    st.markdown("---")
+    st.header("🏦 Bankové údaje")
+    b_ids = st.text_input("Skratka banky", "TB")
+    b_acc = st.text_input("Číslo účtu", "2949268117")
+    b_code = st.
