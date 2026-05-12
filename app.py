@@ -40,7 +40,7 @@ def transform_xml(file_bytes, rada):
     month_map = {1:'JAN', 2:'FEB', 3:'MAR', 4:'APR', 5:'MAY', 6:'JUN', 
                  7:'JUL', 8:'AUG', 9:'SEP', 10:'OCT', 11:'NOV', 12:'DEC'}
     
-    # Opravená štruktúra ID s podčiarkovníkmi medzi všetkými prvkami
+    # Štruktúra ID s podčiarkovníkmi medzi všetkými prvkami
     pack_id = f"{rada}_{now.day:02d}_{month_map[now.month]}_{now.year}_{now.hour:02d}_{now.minute:02d}"
 
     try:
@@ -63,7 +63,7 @@ def transform_xml(file_bytes, rada):
         old_header = old_invoice.find('inv:invoiceHeader', NS)
         if old_header is None: continue
         
-        # 1. Formátovanie čísla faktúry na 4 cifry (napr. 2026VFB0002)
+        # 1. Formátovanie čísla faktúry na 4 cifry (napr. 2026VFB2 -> 2026VFB0002)
         inv_number_elem = old_header.find('inv:number/typ:numberRequested', NS)
         inv_number = "Neznáme"
         if inv_number_elem is not None and inv_number_elem.text:
@@ -99,9 +99,8 @@ def transform_xml(file_bytes, rada):
         new_header.append(old_header.find('inv:number', NS))
         new_header.append(old_header.find('inv:symVar', NS))
         
-        # 3. Dátumy vrátane opravy dateDue
+        # 3. Dátumy (vrátane dateDue)
         date_val = old_header.find('inv:date', NS).text
-        # Pridávame dateDue späť do zoznamu tagov
         for d_tag in ['date', 'dateTax', 'dateDue', 'dateAccounting']:
             ET.SubElement(new_header, f'{{{NS["inv"]}}}{d_tag}').text = date_val
 
@@ -134,6 +133,26 @@ def transform_xml(file_bytes, rada):
         ET.SubElement(my_id_addr, f'{{{NS["typ"]}}}ico').text = '57039607'
         ET.SubElement(my_id_addr, f'{{{NS["typ"]}}}dic').text = '2122546481'
         ET.SubElement(my_id_addr, f'{{{NS["typ"]}}}icDph').text = 'SK2122546481'
+
+        # Položky (iba pre VFD)
+        if rada == 'VFD':
+            old_detail = old_invoice.find('inv:invoiceDetail', NS)
+            if old_detail is not None:
+                new_detail = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceDetail')
+                
+                # Riadok 1: Tovar DE (Základ)
+                item1 = ET.SubElement(new_detail, f'{{{NS["inv"]}}}invoiceItem')
+                ET.SubElement(item1, f'{{{NS["inv"]}}}text').text = 'Tovar DE'
+                ET.SubElement(item1, f'{{{NS["inv"]}}}rateVAT').text = 'none'
+                acc1 = ET.SubElement(item1, f'{{{NS["inv"]}}}accounting')
+                ET.SubElement(acc1, f'{{{NS["typ"]}}}ids').text = 'pred.tov.DE'
+                
+                # Riadok 2: DPH DE
+                item2 = ET.SubElement(new_detail, f'{{{NS["inv"]}}}invoiceItem')
+                ET.SubElement(item2, f'{{{NS["inv"]}}}text').text = 'DPH DE'
+                ET.SubElement(item2, f'{{{NS["inv"]}}}rateVAT').text = 'none'
+                acc2 = ET.SubElement(item2, f'{{{NS["inv"]}}}accounting')
+                ET.SubElement(acc2, f'{{{NS["typ"]}}}ids').text = 'DPH.tov.DE'
 
         # Sumár a prepočet (Násobenie: Cena * Kurz)
         new_summary = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceSummary')
@@ -197,9 +216,10 @@ if st.session_state.transformed_xml is not None:
     else:
         st.info("✓ Validácia firiem v poriadku.")
 
+    # Opravený blok pre sťahovanie
     st.download_button(
         label="💾 Stiahnuť upravené XML pre Pohodu",
         data=st.session_state.transformed_xml,
-        file_name=st.session_state.st.session_state.out_filename if 'out_filename' in st.session_state else "export.xml",
+        file_name=st.session_state.out_filename if 'out_filename' in st.session_state else "export.xml",
         mime="application/xml"
     )
