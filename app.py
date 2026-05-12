@@ -1,4 +1,4 @@
-import streamlit as st
+ import streamlit as st
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -40,16 +40,15 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
     month_map = {1:'JAN', 2:'FEB', 3:'MAR', 4:'APR', 5:'MAY', 6:'JUN', 
                  7:'JUL', 8:'AUG', 9:'SEP', 10:'OCT', 11:'NOV', 12:'DEC'}
     
-    # ID celého balíka (napr. VFB_12_MAY_2026_11_50)
+    # Interné ID (nemeníme ho)
     pack_id = f"{rada}_{now.day:02d}_{month_map[now.month]}_{now.year}_{now.hour:02d}_{now.minute:02d}"
 
     try:
         tree = ET.parse(file_bytes)
         root = tree.getroot()
     except ET.ParseError:
-        return None, ["Chyba parsovania: Súbor nie je platný XML."], 0, pack_id
+        return None, ["Chyba parsovania: Súbor nie je platný XML."], 0, pack_id, ""
 
-    # Hlavná obálka dataPack
     new_root = ET.Element(f'{{{NS["dat"]}}}dataPack', {
         'version': '2.0', 
         'id': pack_id, 
@@ -60,25 +59,35 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
 
     invalid_invoices = []
     processed_count = 0
+    
+    # Premenné pre určenie rozsahu čísiel pre názov súboru
+    first_invoice_num = None
+    last_invoice_num = None
 
-    # Iterujeme cez faktúry s počítadlom pre ID položky (001, 002...)
     for i, item in enumerate(root.findall('dat:dataPackItem', NS), 1):
         old_invoice = item.find('inv:invoice', NS)
         if old_invoice is None: continue
         old_header = old_invoice.find('inv:invoiceHeader', NS)
         if old_header is None: continue
         
-        # Formátovanie čísla faktúry na 4 cifry
+        # 1. Formátovanie čísla faktúry na 4 cifry
         inv_number_elem = old_header.find('inv:number/typ:numberRequested', NS)
-        inv_number = "Neznáme"
+        current_invoice_suffix = ""
+        
         if inv_number_elem is not None and inv_number_elem.text:
             orig_num = inv_number_elem.text.strip()
             match = re.match(r"^(.*?)(\d+)$", orig_num)
             if match:
                 prefix = match.group(1)
                 num_part = match.group(2)
-                inv_number = f"{prefix}{num_part.zfill(4)}" 
+                current_invoice_suffix = num_part.zfill(4)
+                inv_number = f"{prefix}{current_invoice_suffix}" 
                 inv_number_elem.text = inv_number 
+                
+                # Uložíme si prvú a poslednú koncovku pre názov súboru
+                if first_invoice_num is None:
+                    first_invoice_num = current_invoice_suffix
+                last_invoice_num = current_invoice_suffix
             else:
                 inv_number = orig_num
 
@@ -91,7 +100,6 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
                 if ico is None or not ico.text or not ico.text.strip():
                     invalid_invoices.append(f"FA {inv_number} (Firma: {company.text})")
 
-        # --- TVORBA STRUKTURY PODĽA VZORU ---
         # 1. dataPackItem s ID v tvare "ExportName (001)"
         item_id = f"{pack_id} ({i:03d})"
         new_item = ET.SubElement(new_root, f'{{{NS["dat"]}}}dataPackItem', {
@@ -99,18 +107,15 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
             'id': item_id
         })
 
-        # 2. invoice s explicitným xmlns:inv
         new_invoice = ET.SubElement(new_item, f'{{{NS["inv"]}}}invoice', {
             'version': '2.0',
             'xmlns:inv': NS['inv']
         })
 
-        # 3. invoiceHeader s explicitným xmlns:typ
         new_header = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceHeader', {
             'xmlns:typ': NS['typ']
         })
         
-        # -- Elementy v presnom poradí --
         ET.SubElement(new_header, f'{{{NS["inv"]}}}invoiceType').text = 'issuedInvoice'
         new_header.append(old_header.find('inv:number', NS))
         new_header.append(old_header.find('inv:symVar', NS))
@@ -128,7 +133,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         ET.SubElement(new_header, f'{{{NS["inv"]}}}dateAccounting').text = date_val
         ET.SubElement(new_header, f'{{{NS["inv"]}}}dateDue').text = date_due_val
 
-        # Účtovanie a KV DPH
+        # Účtovanie
         acc = ET.SubElement(new_header, f'{{{NS["inv"]}}}accounting')
         class_vat = ET.SubElement(new_header, f'{{{NS["inv"]}}}classificationVAT')
         
@@ -147,7 +152,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         text_val = 'Tržby z predaja tovaru' if rada == 'VFB' else 'Predaj tovaru - Nemecko'
         ET.SubElement(new_header, f'{{{NS["inv"]}}}text').text = text_val
 
-        # Adresa odberateľa (očistená a inteligentný linkToAddress)
+        # Adresa a linkToAddress
         old_address = old_header.find('.//typ:address', NS)
         if old_address is not None:
             has_valid_ico = False
@@ -155,13 +160,11 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
                 e = old_address.find(f'typ:{tag}', NS)
                 if e is not None:
                     if not e.text or not e.text.strip():
-                        old_address.remove(e) # Odstráni prázdne tagy
+                        old_address.remove(e)
                     elif tag == 'ico':
-                        has_valid_ico = True # Ak prežilo neprázdne IČO
+                        has_valid_ico = True
             
-            # Logika ukladania do adresára Pohody
             old_address.set('linkToAddress', 'true' if has_valid_ico else 'false')
-            
             ET.SubElement(new_header, f'{{{NS["inv"]}}}partnerIdentity').append(old_address)
 
         # Naša Identita
@@ -175,7 +178,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         ET.SubElement(my_id_addr, f'{{{NS["typ"]}}}dic').text = '2122546481'
         ET.SubElement(my_id_addr, f'{{{NS["typ"]}}}icDph').text = 'SK2122546481'
 
-        # Platba a Banka
+        # Banka a Zámky
         pt = ET.SubElement(new_header, f'{{{NS["inv"]}}}paymentType')
         ET.SubElement(pt, f'{{{NS["typ"]}}}ids').text = payment_type
         ET.SubElement(pt, f'{{{NS["typ"]}}}paymentType').text = 'draft'
@@ -186,8 +189,6 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         ET.SubElement(acc_node, f'{{{NS["typ"]}}}bankCode').text = bank_code
 
         ET.SubElement(new_header, f'{{{NS["inv"]}}}symConst').text = sym_const
-
-        # Zámky
         ET.SubElement(new_header, f'{{{NS["inv"]}}}markRecord').text = 'true'
         ET.SubElement(new_header, f'{{{NS["inv"]}}}lock2').text = 'true'
 
@@ -222,9 +223,15 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         
         processed_count += 1
 
+    # Tvorba názvu súboru s rozsahom (napr. VFB0001-0015_...)
+    range_str = f"{first_invoice_num}-{last_invoice_num}" if first_invoice_num and last_invoice_num else ""
+    # Formát dátumu a času pre názov súboru s podčiarkovníkmi
+    timestamp_str = f"{now.day:02d}_{month_map[now.month]}_{now.year}_{now.hour:02d}_{now.minute:02d}"
+    filename = f"{rada}{range_str}_{timestamp_str}.xml"
+
     output_bytes = io.BytesIO()
     ET.ElementTree(new_root).write(output_bytes, encoding='Windows-1250', xml_declaration=True)
-    return output_bytes.getvalue(), invalid_invoices, processed_count, pack_id
+    return output_bytes.getvalue(), invalid_invoices, processed_count, pack_id, filename
 
 # ==========================================
 # STREAMLIT UI
@@ -249,14 +256,14 @@ uploaded_file = st.file_uploader("Nahrajte XML z Base.com", type=["xml"])
 if uploaded_file is not None:
     if st.button("🚀 Spustiť transformáciu", type="primary"):
         with st.spinner('Spracovávam...'):
-            xml_data, errors, count, pack_id = transform_xml(
+            xml_data, errors, count, pack_id, out_filename = transform_xml(
                 io.BytesIO(uploaded_file.getvalue()), 
                 zvolena_rada, due_days, bank_ids, bank_acc, bank_code, payment_type, sym_const
             )
             st.session_state.transformed_xml = xml_data
             st.session_state.errors = errors
             st.session_state.count = count
-            st.session_state.out_filename = f"{pack_id}.xml"
+            st.session_state.out_filename = out_filename
 
 if st.session_state.transformed_xml is not None:
     st.divider()
