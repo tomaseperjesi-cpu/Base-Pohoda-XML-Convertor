@@ -67,7 +67,6 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         # 1. Číslo faktúry (formátovanie na 4 cifry)
         inv_number_elem = old_header.find('inv:number/typ:numberRequested', NS)
         current_suffix = ""
-        inv_number = "Neznáme"
         if inv_number_elem is not None and inv_number_elem.text:
             orig_num = inv_number_elem.text.strip()
             match = re.match(r"^(.*?)(\d+)$", orig_num)
@@ -82,120 +81,5 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
             else:
                 inv_number = orig_num
 
-        # 2. Kontrola firmy bez IČO
+        # 2. Kontrola firmy bez IČO a neúplnej adresy
         partner = old_header.find('.//typ:address', NS)
-        if partner is not None:
-            comp = partner.find('typ:company', NS)
-            ico_e = partner.find('typ:ico', NS)
-            if comp is not None and comp.text and comp.text.strip():
-                if ico_e is None or not ico_e.text or not ico_e.text.strip():
-                    invalid_invoices.append(f"FA {inv_number} (Firma: {comp.text})")
-
-        # 3. Tvorba položky dataPackItem
-        item_id = f"{pack_id} ({i:03d})"
-        new_item = ET.SubElement(new_root, f'{{{NS["dat"]}}}dataPackItem', {'version': '2.0', 'id': item_id})
-        new_invoice = ET.SubElement(new_item, f'{{{NS["inv"]}}}invoice', {'version': '2.0', 'xmlns:inv': NS['inv']})
-        new_header = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceHeader', {'xmlns:typ': NS['typ']})
-        
-        # -- Poradie elementov v hlavičke --
-        ET.SubElement(new_header, f'{{{NS["inv"]}}}invoiceType').text = 'issuedInvoice'
-        new_header.append(old_header.find('inv:number', NS))
-        new_header.append(old_header.find('inv:symVar', NS))
-        
-        date_val = old_header.find('inv:date', NS).text
-        try:
-            date_obj = datetime.strptime(date_val, "%Y-%m-%d")
-            date_due_val = (date_obj + timedelta(days=due_days)).strftime("%Y-%m-%d")
-        except:
-            date_due_val = date_val
-            
-        ET.SubElement(new_header, f'{{{NS["inv"]}}}date').text = date_val
-        ET.SubElement(new_header, f'{{{NS["inv"]}}}dateTax').text = date_val
-        ET.SubElement(new_header, f'{{{NS["inv"]}}}dateAccounting').text = date_val
-        ET.SubElement(new_header, f'{{{NS["inv"]}}}dateDue').text = date_due_val
-
-        # Účtovanie a DPH
-        acc = ET.SubElement(new_header, f'{{{NS["inv"]}}}accounting')
-        cvat = ET.SubElement(new_header, f'{{{NS["inv"]}}}classificationVAT')
-        if rada == 'VFB':
-            ET.SubElement(acc, f'{{{NS["typ"]}}}ids').text = 'pred.tovaru'
-            ET.SubElement(cvat, f'{{{NS["typ"]}}}ids').text = 'UN'
-        else:
-            ET.SubElement(acc, f'{{{NS["typ"]}}}ids').text = 'pred.tov.DE'
-            ET.SubElement(cvat, f'{{{NS["typ"]}}}ids').text = 'UD'
-        ET.SubElement(cvat, f'{{{NS["typ"]}}}classificationVATType').text = 'nonSubsume'
-
-        ckv = ET.SubElement(new_header, f'{{{NS["inv"]}}}classificationKVDPH')
-        ET.SubElement(ckv, f'{{{NS["typ"]}}}ids').text = 'KN'
-
-        text_v = 'Tržby z predaja tovaru' if rada == 'VFB' else 'Predaj tovaru - Nemecko'
-        ET.SubElement(new_header, f'{{{NS["inv"]}}}text').text = text_v
-
-        # Partner
-        if partner is not None:
-            has_ico_real = False
-            
-            # --- DOPLNENÁ LOGIKA: KONTROLA PRÁZDNYCH ADRESNÝCH POLÍ ---
-            missing_addr = []
-            for addr_f in ['name', 'city', 'street', 'zip', 'country']:
-                e = partner.find(f'typ:{addr_f}', NS)
-                if addr_f == 'country' and e is not None:
-                    # Krajina obsahuje vnorený tag <typ:ids>
-                    ids_e = e.find('typ:ids', NS)
-                    if ids_e is None or not ids_e.text or not ids_e.text.strip():
-                        missing_addr.append(addr_f)
-                else:
-                    if e is None or not e.text or not e.text.strip():
-                        missing_addr.append(addr_f)
-            
-            if missing_addr:
-                transl = {'name': 'Meno', 'city': 'Mesto', 'street': 'Ulica', 'zip': 'PSČ', 'country': 'Krajina'}
-                miss_sk = [transl.get(x, x) for x in missing_addr]
-                invalid_invoices.append(f"FA {inv_number}: Neúplná adresa (chýba: {', '.join(miss_sk)})")
-            # -----------------------------------------------------------
-
-            for t in ['company', 'ico', 'dic', 'icDph']:
-                e = partner.find(f'typ:{t}', NS)
-                if e is not None:
-                    if not e.text or not e.text.strip(): partner.remove(e)
-                    elif t == 'ico': has_ico_real = True
-            partner.set('linkToAddress', 'true' if has_ico_real else 'false')
-            ET.SubElement(new_header, f'{{{NS["inv"]}}}partnerIdentity').append(partner)
-
-        # Identita
-        my_id = ET.SubElement(ET.SubElement(new_header, f'{{{NS["inv"]}}}myIdentity'), f'{{{NS["typ"]}}}address')
-        ET.SubElement(my_id, f'{{{NS["typ"]}}}company').text = 'EPPO BRANDS s. r. o.'
-        ET.SubElement(my_id, f'{{{NS["typ"]}}}city').text = 'Zvolen'
-        ET.SubElement(my_id, f'{{{NS["typ"]}}}street').text = 'Tulská'
-        ET.SubElement(my_id, f'{{{NS["typ"]}}}number').text = '9386/6B'
-        ET.SubElement(my_id, f'{{{NS["typ"]}}}zip').text = '960 01'
-        ET.SubElement(my_id, f'{{{NS["typ"]}}}ico').text = '57039607'
-        ET.SubElement(my_id, f'{{{NS["typ"]}}}dic').text = '2122546481'
-        ET.SubElement(my_id, f'{{{NS["typ"]}}}icDph').text = 'SK2122546481'
-
-        # Banka a platba
-        pt_n = ET.SubElement(new_header, f'{{{NS["inv"]}}}paymentType')
-        ET.SubElement(pt_n, f'{{{NS["typ"]}}}ids').text = payment_type
-        ET.SubElement(pt_n, f'{{{NS["typ"]}}}paymentType').text = 'draft'
-        bnk = ET.SubElement(new_header, f'{{{NS["inv"]}}}account')
-        ET.SubElement(bnk, f'{{{NS["typ"]}}}ids').text = bank_ids
-        ET.SubElement(bnk, f'{{{NS["typ"]}}}accountNo').text = bank_acc
-        ET.SubElement(bnk, f'{{{NS["typ"]}}}bankCode').text = bank_code
-        ET.SubElement(new_header, f'{{{NS["inv"]}}}symConst').text = sym_const
-
-        # 4. Likvidácia a Sumáre
-        old_sum = old_invoice.find('inv:invoiceSummary', NS)
-        h_sum, f_sum = 0.0, 0.0
-        is_f = False
-        c_ids, c_rate = "EUR", 1.0
-
-        if old_sum is not None:
-            fc_e = old_sum.find('inv:foreignCurrency', NS)
-            if fc_e is not None:
-                is_f = True
-                c_ids = fc_e.find('typ:currency/typ:ids', NS).text
-                c_rate = float(fc_e.find('typ:rate', NS).text)
-                f_sum = float(old_invoice.find('.//inv:foreignCurrency/typ:priceSum', NS).text)
-                h_sum = round(f_sum * c_rate, 2)
-            else:
-                h_sum = float(old_invoice.find('.//inv:
