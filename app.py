@@ -6,6 +6,11 @@ import io
 import re
 
 # ==========================================
+# 1. NASTAVENIE STRÁNKY (Bezpečná pozícia pre Streamlit)
+# ==========================================
+st.set_page_config(page_title="Pohoda XML Transform", page_icon="📝", layout="wide")
+
+# ==========================================
 # KONFIGURÁCIA A MENNÉ PRIESTORY POHODY
 # ==========================================
 MY_ICO = "57039607"
@@ -67,6 +72,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         # 1. Číslo faktúry (formátovanie na 4 cifry)
         inv_number_elem = old_header.find('inv:number/typ:numberRequested', NS)
         current_suffix = ""
+        inv_number = "Neznáme"
         if inv_number_elem is not None and inv_number_elem.text:
             orig_num = inv_number_elem.text.strip()
             match = re.match(r"^(.*?)(\d+)$", orig_num)
@@ -80,15 +86,6 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
                 last_inv_suffix = current_suffix
             else:
                 inv_number = orig_num
-
-        # 2. Kontrola firmy bez IČO
-        partner = old_header.find('.//typ:address', NS)
-        if partner is not None:
-            comp = partner.find('typ:company', NS)
-            ico_e = partner.find('typ:ico', NS)
-            if comp is not None and comp.text and comp.text.strip():
-                if ico_e is None or not ico_e.text or not ico_e.text.strip():
-                    invalid_invoices.append(f"FA {inv_number} (Firma: {comp.text})")
 
         # 3. Tvorba položky dataPackItem
         item_id = f"{pack_id} ({i:03d})"
@@ -131,13 +128,37 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         ET.SubElement(new_header, f'{{{NS["inv"]}}}text').text = text_v
 
         # Partner
+        partner = old_header.find('.//typ:address', NS)
         if partner is not None:
+            # Kontrola firmy bez IČO
+            comp = partner.find('typ:company', NS)
+            ico_e = partner.find('typ:ico', NS)
+            if comp is not None and comp.text and comp.text.strip():
+                if ico_e is None or not ico_e.text or not ico_e.text.strip():
+                    invalid_invoices.append(f"FA {inv_number}: Firma bez IČO ({comp.text.strip()})")
+
+            # NOVÉ: Kontrola prázdnych polí adresy (bez mazania tagov)
+            missing_addr = []
+            for addr_f in ['name', 'city', 'street', 'zip', 'country']:
+                e = partner.find(f'typ:{addr_f}', NS)
+                if e is None or not e.text or not e.text.strip():
+                    missing_addr.append(addr_f)
+            
+            if missing_addr:
+                transl = {'name': 'Meno', 'city': 'Mesto', 'street': 'Ulica', 'zip': 'PSČ', 'country': 'Krajina'}
+                miss_sk = [transl.get(x, x) for x in missing_addr]
+                invalid_invoices.append(f"FA {inv_number}: Neúplná adresa (chýba: {', '.join(miss_sk)})")
+
+            # Mazanie len pre tax/firemné polia
             has_ico_real = False
             for t in ['company', 'ico', 'dic', 'icDph']:
                 e = partner.find(f'typ:{t}', NS)
                 if e is not None:
-                    if not e.text or not e.text.strip(): partner.remove(e)
-                    elif t == 'ico': has_ico_real = True
+                    if not e.text or not e.text.strip(): 
+                        partner.remove(e)
+                    elif t == 'ico': 
+                        has_ico_real = True
+                        
             partner.set('linkToAddress', 'true' if has_ico_real else 'false')
             ET.SubElement(new_header, f'{{{NS["inv"]}}}partnerIdentity').append(partner)
 
@@ -237,7 +258,6 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
 # ==========================================
 # STREAMLIT UI
 # ==========================================
-st.set_page_config(page_title="Pohoda XML Transform", page_icon="📝", layout="wide")
 st.title("📦 Base.com -> Pohoda XML Transformátor")
 
 with st.sidebar:
@@ -267,6 +287,6 @@ if st.session_state.transformed_xml is not None:
     st.divider()
     st.success(f"✅ Spracovaných {st.session_state.count} faktúr.")
     if st.session_state.errors:
-        st.warning("⚠️ Skontrolujte tieto faktúry (Firma bez IČO):")
+        st.warning("⚠️ UPOZORNENIA PRED IMPORTOM:")
         for err in st.session_state.errors: st.write(f"- {err}")
     st.download_button(label="💾 Stiahnuť upravené XML", data=st.session_state.transformed_xml, file_name=st.session_state.out_filename, mime="application/xml")
