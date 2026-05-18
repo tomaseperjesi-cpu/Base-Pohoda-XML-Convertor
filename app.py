@@ -300,9 +300,11 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
 st.set_page_config(page_title="Pohoda XML Transform", page_icon="📝", layout="wide")
 
 with st.sidebar:
-    # --- PRIDANÉ LOGO ---
+    # --- LOGO SO ZMENŠENÍM O 20% (pomer 0.8) ---
     if os.path.exists("eppobrands.png"):
-        st.image("eppobrands.png", use_container_width=True)
+        col_logo1, col_logo2 = st.columns([0.8, 0.2])
+        with col_logo1:
+            st.image("eppobrands.png", use_container_width=True)
     
     st.header("⚙️ Nastavenia")
     rada_sel = st.radio("Dokladová rada:", ('VFB', 'VFD', 'VF'))
