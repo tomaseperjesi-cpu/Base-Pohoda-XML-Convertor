@@ -82,14 +82,25 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
             else:
                 inv_number = orig_num
 
-        # 2. Kontrola firmy bez IČO
+        # 2. Kontrola a úprava IČO / Firmy
         partner = old_header.find('.//typ:address', NS)
         if partner is not None:
-            comp = partner.find('typ:company', NS)
             ico_e = partner.find('typ:ico', NS)
+            
+            # --- DOPLNENÁ KONTROLA: Amazon odkaz v IČO ---
+            if ico_e is not None and ico_e.text:
+                ico_text_lower = ico_e.text.strip().lower()
+                # Ak text obsahuje odkaz na web alebo amazon, odstránime ho
+                if "http" in ico_text_lower or "www." in ico_text_lower or "amazon" in ico_text_lower:
+                    partner.remove(ico_e)
+                    invalid_invoices.append(f"FA {inv_number}: Odstránené neplatné IČO (internetový odkaz)")
+                    ico_e = None # Vynulujeme referenciu pre nasledujúcu kontrolu
+            # ---------------------------------------------
+            
+            comp = partner.find('typ:company', NS)
             if comp is not None and comp.text and comp.text.strip():
                 if ico_e is None or not ico_e.text or not ico_e.text.strip():
-                    invalid_invoices.append(f"FA {inv_number} (Firma: {comp.text})")
+                    invalid_invoices.append(f"FA {inv_number} (Firma: {comp.text.strip()})")
 
         # 3. Tvorba položky dataPackItem
         item_id = f"{pack_id} ({i:03d})"
@@ -133,23 +144,15 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
 
         # Partner
         if partner is not None:
-            # --- DOPLNENÁ KONTROLA ADRESY (Iba upozornenia, nič nemaže) ---
+            # --- KONTROLA ADRESY (Iba upozornenia, nič nemaže) ---
             missing_addr = []
-            for addr_f in ['name', 'city', 'street', 'zip', 'country']:
+            for addr_f in ['name', 'city', 'street', 'zip']:
                 e = partner.find(f'typ:{addr_f}', NS)
-                if addr_f == 'country':
-                    if e is not None:
-                        ids_e = e.find('typ:ids', NS)
-                        if ids_e is None or not ids_e.text or not ids_e.text.strip():
-                            missing_addr.append(addr_f)
-                    else:
-                        missing_addr.append(addr_f)
-                else:
-                    if e is None or not e.text or not e.text.strip():
-                        missing_addr.append(addr_f)
+                if e is None or not e.text or not e.text.strip():
+                    missing_addr.append(addr_f)
             
             if missing_addr:
-                transl = {'name': 'Meno', 'city': 'Mesto', 'street': 'Ulica', 'zip': 'PSČ', 'country': 'Krajina'}
+                transl = {'name': 'Meno', 'city': 'Mesto', 'street': 'Ulica', 'zip': 'PSČ'}
                 miss_sk = [transl.get(x, x) for x in missing_addr]
                 invalid_invoices.append(f"FA {inv_number}: Neúplná adresa (chýba: {', '.join(miss_sk)})")
             # -------------------------------------------------------------
