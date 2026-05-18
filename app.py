@@ -82,25 +82,34 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
             else:
                 inv_number = orig_num
 
-        # 2. Kontrola a úprava IČO / Firmy
+        # 2. Kontrola a úprava IČO / Firmy / Adresy
         partner = old_header.find('.//typ:address', NS)
         if partner is not None:
             ico_e = partner.find('typ:ico', NS)
             
-            # --- DOPLNENÁ KONTROLA: Amazon odkaz v IČO ---
+            # Kontrola Amazon odkazu v IČO
             if ico_e is not None and ico_e.text:
                 ico_text_lower = ico_e.text.strip().lower()
-                # Ak text obsahuje odkaz na web alebo amazon, odstránime ho
                 if "http" in ico_text_lower or "www." in ico_text_lower or "amazon" in ico_text_lower:
                     partner.remove(ico_e)
                     invalid_invoices.append(f"FA {inv_number}: Odstránené neplatné IČO (internetový odkaz)")
-                    ico_e = None # Vynulujeme referenciu pre nasledujúcu kontrolu
-            # ---------------------------------------------
+                    ico_e = None
             
             comp = partner.find('typ:company', NS)
             if comp is not None and comp.text and comp.text.strip():
                 if ico_e is None or not ico_e.text or not ico_e.text.strip():
                     invalid_invoices.append(f"FA {inv_number} (Firma: {comp.text.strip()})")
+
+            # Kontrola adresy (iba upozornenia)
+            missing_addr = []
+            for addr_f in ['name', 'city', 'street', 'zip']:
+                e = partner.find(f'typ:{addr_f}', NS)
+                if e is None or not e.text or not e.text.strip():
+                    missing_addr.append(addr_f)
+            if missing_addr:
+                transl = {'name': 'Meno', 'city': 'Mesto', 'street': 'Ulica', 'zip': 'PSČ'}
+                miss_sk = [transl.get(x, x) for x in missing_addr]
+                invalid_invoices.append(f"FA {inv_number}: Neúplná adresa (chýba: {', '.join(miss_sk)})")
 
         # 3. Tvorba položky dataPackItem
         item_id = f"{pack_id} ({i:03d})"
@@ -108,7 +117,6 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         new_invoice = ET.SubElement(new_item, f'{{{NS["inv"]}}}invoice', {'version': '2.0', 'xmlns:inv': NS['inv']})
         new_header = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceHeader', {'xmlns:typ': NS['typ']})
         
-        # -- Poradie elementov v hlavičke --
         ET.SubElement(new_header, f'{{{NS["inv"]}}}invoiceType').text = 'issuedInvoice'
         new_header.append(old_header.find('inv:number', NS))
         new_header.append(old_header.find('inv:symVar', NS))
@@ -125,15 +133,16 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         ET.SubElement(new_header, f'{{{NS["inv"]}}}dateAccounting').text = date_val
         ET.SubElement(new_header, f'{{{NS["inv"]}}}dateDue').text = date_due_val
 
-        # Účtovanie a DPH
+        # Účtovanie a Členenie DPH (Pre VFB aj VFD je to UN)
         acc = ET.SubElement(new_header, f'{{{NS["inv"]}}}accounting')
         cvat = ET.SubElement(new_header, f'{{{NS["inv"]}}}classificationVAT')
+        
         if rada == 'VFB':
             ET.SubElement(acc, f'{{{NS["typ"]}}}ids').text = 'pred.tovaru'
-            ET.SubElement(cvat, f'{{{NS["typ"]}}}ids').text = 'UN'
-        else:
+        else: # VFD
             ET.SubElement(acc, f'{{{NS["typ"]}}}ids').text = 'pred.tov.DE'
-            ET.SubElement(cvat, f'{{{NS["typ"]}}}ids').text = 'UD'
+            
+        ET.SubElement(cvat, f'{{{NS["typ"]}}}ids').text = 'UN' # Oba teraz používajú UN
         ET.SubElement(cvat, f'{{{NS["typ"]}}}classificationVATType').text = 'nonSubsume'
 
         ckv = ET.SubElement(new_header, f'{{{NS["inv"]}}}classificationKVDPH')
@@ -144,19 +153,6 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
 
         # Partner
         if partner is not None:
-            # --- KONTROLA ADRESY (Iba upozornenia, nič nemaže) ---
-            missing_addr = []
-            for addr_f in ['name', 'city', 'street', 'zip']:
-                e = partner.find(f'typ:{addr_f}', NS)
-                if e is None or not e.text or not e.text.strip():
-                    missing_addr.append(addr_f)
-            
-            if missing_addr:
-                transl = {'name': 'Meno', 'city': 'Mesto', 'street': 'Ulica', 'zip': 'PSČ'}
-                miss_sk = [transl.get(x, x) for x in missing_addr]
-                invalid_invoices.append(f"FA {inv_number}: Neúplná adresa (chýba: {', '.join(miss_sk)})")
-            # -------------------------------------------------------------
-
             has_ico_real = False
             for t in ['company', 'ico', 'dic', 'icDph']:
                 e = partner.find(f'typ:{t}', NS)
@@ -187,7 +183,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         ET.SubElement(bnk, f'{{{NS["typ"]}}}bankCode').text = bank_code
         ET.SubElement(new_header, f'{{{NS["inv"]}}}symConst').text = sym_const
 
-        # 4. Likvidácia a Sumáre
+        # 4. Likvidácia a Sumáre (Výpočty pre VFD rozpis)
         old_sum = old_invoice.find('inv:invoiceSummary', NS)
         h_sum, f_sum = 0.0, 0.0
         is_f = False
@@ -208,16 +204,24 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         ET.SubElement(liq, f'{{{NS["typ"]}}}amountHome').text = f"{h_sum:.2f}"
         if is_f: ET.SubElement(liq, f'{{{NS["typ"]}}}amountForeign').text = f"{f_sum:.2f}"
 
-        # 5. Zámky nastavené na FALSE
+        # Zámky
         ET.SubElement(new_header, f'{{{NS["inv"]}}}lock2').text = 'false'
         ET.SubElement(new_header, f'{{{NS["inv"]}}}markRecord').text = 'false'
 
         # Položky pre VFD (Rozpad)
+        vat_part, base_part = 0.0, h_sum
         if rada == 'VFD':
             det = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceDetail')
-            vat_part = round(f_sum - (f_sum / 1.19), 2)
-            base_part = round(f_sum - vat_part, 2)
-            for t, val, acc_id in [('Tovar DE', base_part, 'pred.tov.DE'), ('DPH DE', vat_part, 'DPH.tov.DE')]:
+            # Pre VFD pracujeme s cudziou menou ak existuje, inak s domacou
+            val_to_split = f_sum if is_f else h_sum
+            f_vat_part = round(val_to_split - (val_to_split / 1.19), 2)
+            f_base_part = round(val_to_split - f_vat_part, 2)
+            
+            # Uložíme si hodnoty pre sumár (v domácej mene)
+            vat_part = round(f_vat_part * c_rate, 2) if is_f else f_vat_part
+            base_part = round(f_base_part * c_rate, 2) if is_f else f_base_part
+
+            for t, val, acc_id in [('Tovar DE', f_base_part, 'pred.tov.DE'), ('DPH DE', f_vat_part, 'DPH.tov.DE')]:
                 it = ET.SubElement(det, f'{{{NS["inv"]}}}invoiceItem')
                 ET.SubElement(it, f'{{{NS["inv"]}}}text').text = t
                 ET.SubElement(it, f'{{{NS["inv"]}}}quantity').text = '1'
@@ -234,8 +238,21 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         ET.SubElement(ns_sum, f'{{{NS["inv"]}}}roundingVAT').text = 'none'
         
         hc = ET.SubElement(ns_sum, f'{{{NS["inv"]}}}homeCurrency')
-        ET.SubElement(hc, f'{{{NS["typ"]}}}priceNone').text = f"{h_sum:.2f}"
-        for tag in ['priceLow', 'priceLowVAT', 'priceLowSum', 'priceHigh', 'priceHighVAT', 'priceHighSum', 'price3', 'price3VAT', 'price3Sum']:
+        
+        if rada == 'VFD':
+            # Pre VFD rozpisujeme DPH do High sadzby (aj keď je členenie UN)
+            ET.SubElement(hc, f'{{{NS["typ"]}}}priceNone').text = '0'
+            ET.SubElement(hc, f'{{{NS["typ"]}}}priceHigh').text = f"{base_part:.2f}"
+            ET.SubElement(hc, f'{{{NS["typ"]}}}priceHighVAT').text = f"{vat_part:.2f}"
+            ET.SubElement(hc, f'{{{NS["typ"]}}}priceHighSum').text = f"{h_sum:.2f}"
+        else:
+            # Pre VFB ostáva všetko v priceNone
+            ET.SubElement(hc, f'{{{NS["typ"]}}}priceNone').text = f"{h_sum:.2f}"
+            ET.SubElement(hc, f'{{{NS["typ"]}}}priceHigh').text = '0'
+            ET.SubElement(hc, f'{{{NS["typ"]}}}priceHighVAT').text = '0'
+            ET.SubElement(hc, f'{{{NS["typ"]}}}priceHighSum').text = '0'
+
+        for tag in ['priceLow', 'priceLowVAT', 'priceLowSum', 'price3', 'price3VAT', 'price3Sum']:
             ET.SubElement(hc, f'{{{NS["typ"]}}}{tag}').text = '0'
         ET.SubElement(ET.SubElement(hc, f'{{{NS["typ"]}}}round'), f'{{{NS["typ"]}}}priceRound').text = '0'
 
@@ -245,12 +262,20 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
             ET.SubElement(tc, f'{{{NS["typ"]}}}ids').text = c_ids
             ET.SubElement(fc, f'{{{NS["typ"]}}}rate').text = str(c_rate)
             ET.SubElement(fc, f'{{{NS["typ"]}}}amount').text = '1'
+            
+            if rada == 'VFD':
+                # Rozpis v cudzej mene pre VFD
+                f_vat = round(f_sum - (f_sum / 1.19), 2)
+                f_base = round(f_sum - f_vat, 2)
+                ET.SubElement(fc, f'{{{NS["typ"]}}}priceHigh').text = f"{f_base:.2f}"
+                ET.SubElement(fc, f'{{{NS["typ"]}}}priceHighVAT').text = f"{f_vat:.2f}"
+            
             ET.SubElement(fc, f'{{{NS["typ"]}}}priceSum').text = f"{f_sum:.2f}"
             ET.SubElement(ET.SubElement(fc, f'{{{NS["typ"]}}}round'), f'{{{NS["typ"]}}}priceRound').text = '0'
         
         processed_count += 1
 
-    # Názov súboru s rozsahom faktúr
+    # Názov súboru
     range_txt = f"{first_inv_suffix}-{last_inv_suffix}" if first_inv_suffix else ""
     ts = f"{now.day:02d}_{month_map[now.month]}_{now.year}_{now.hour:02d}_{now.minute:02d}"
     out_name = f"{rada}{range_txt}_{ts}.xml"
