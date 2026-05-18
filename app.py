@@ -40,7 +40,7 @@ if 'vf_goods_map' not in st.session_state:
 # POMOCNÉ FUNKCIE
 # ==========================================
 def get_invoice_list(file_bytes):
-    """Vytiahne zoznam faktúr pre interaktívny výber v rade VF."""
+    """Vytiahne zoznam faktúr a TEXT Z PRVEJ POLOŽKY pre radu VF."""
     try:
         tree = ET.parse(file_bytes)
         root = tree.getroot()
@@ -49,12 +49,21 @@ def get_invoice_list(file_bytes):
             inv = item.find('inv:invoice', NS)
             if inv is None: continue
             header = inv.find('inv:invoiceHeader', NS)
+            detail = inv.find('inv:invoiceDetail', NS)
             if header is None: continue
             
             num = header.find('inv:number/typ:numberRequested', NS)
-            text_el = header.find('inv:text', NS)
             num_val = num.text if num is not None else "Neznáme"
-            text_val = text_el.text if text_el is not None else "Bez textu"
+            
+            # Hľadáme text v prvej položke faktúry
+            text_val = "Bez textu"
+            if detail is not None:
+                first_item = detail.find('inv:invoiceItem', NS)
+                if first_item is not None:
+                    it_text = first_item.find('inv:text', NS)
+                    if it_text is not None and it_text.text:
+                        text_val = it_text.text.strip()
+            
             invoices.append({'id': num_val, 'text': text_val})
         return invoices
     except:
@@ -263,7 +272,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
                         is_goods = goods_selection.get(orig_num, False)
                         ET.SubElement(ET.SubElement(new_it, f'{{{NS["inv"]}}}accounting'), f'{{{NS["typ"]}}}ids').text = 'pred.tovaru' if is_goods else 'pred.služ'
 
-        # Detailný Sumár
+        # Sumár
         s_attrs = {'xmlns:rsp': NS['rsp'], 'xmlns:rdc': NS['rdc'], 'xmlns:typ': NS['typ'], 'xmlns:ftr': NS['ftr'], 'xmlns:lst': NS['lst']}
         ns_sum = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceSummary', s_attrs)
         ET.SubElement(ns_sum, f'{{{NS["inv"]}}}roundingDocument').text = 'none'
@@ -296,7 +305,6 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
 # STREAMLIT UI
 # ==========================================
 with st.sidebar:
-    # LOGO S PEVNOU ŠÍRKOU (LADÍ K TEXTU)
     if os.path.exists("eppobrands.png"):
         st.image("eppobrands.png", width=150)
     
@@ -311,7 +319,7 @@ with st.sidebar:
     s_const = st.text_input("Konštantný symbol", "0308")
     d_days = st.number_input("Splatnosť (dni)", 7)
 
-st.title("📦 XML Transformátor (Base.com / Bitfaktura -> Pohoda)")
+st.title("📦 XML Transformátor (Multi-Source -> Pohoda)")
 
 u_file = st.file_uploader("Nahrajte zdrojové XML", type=["xml"])
 
