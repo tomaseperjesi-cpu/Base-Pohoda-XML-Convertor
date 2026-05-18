@@ -40,7 +40,7 @@ if 'vf_goods_map' not in st.session_state:
 # POMOCNÉ FUNKCIE
 # ==========================================
 def get_invoice_list(file_bytes):
-    """Vytiahne zoznam faktúr a ich TEXTOV pre radu VF."""
+    """Vytiahne zoznam faktúr a TEXTOV pre radu VF."""
     try:
         tree = ET.parse(file_bytes)
         root = tree.getroot()
@@ -55,7 +55,7 @@ def get_invoice_list(file_bytes):
             num_el = header.find('inv:number/typ:numberRequested', NS)
             num_val = num_el.text.strip() if num_el is not None else "Neznáme"
             
-            text_val = "Bez textu"
+            text_val = "Bez popisu"
             if detail is not None:
                 first_item = detail.find('inv:invoiceItem', NS)
                 if first_item is not None:
@@ -83,7 +83,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         tree = ET.parse(file_bytes)
         root = tree.getroot()
     except ET.ParseError:
-        return None, ["Chyba parsovania XML."], 0, pack_id, ""
+        return None, ["Chyba parsovania XML súboru."], 0, pack_id, ""
 
     new_root = ET.Element(f'{{{NS["dat"]}}}dataPack', {
         'version': '2.0', 'id': pack_id, 'ico': MY_ICO, 'application': 'import', 'note': 'import'
@@ -99,10 +99,16 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         old_header = old_invoice.find('inv:invoiceHeader', NS)
         if old_header is None: continue
         
-        # Číslo faktúry
+        # 1. Identifikácia faktúry
         inv_num_el = old_header.find('inv:number/typ:numberRequested', NS)
         orig_num = inv_num_el.text.strip() if inv_num_el is not None else "0"
         
+        # Určenie, či je to tovar (bezpečne, bez KeyError)
+        is_this_item_goods = False
+        if rada == 'VF' and goods_selection:
+            is_this_item_goods = goods_selection.get(orig_num, False)
+
+        # Formátovanie čísla
         match = re.search(r"(\d+)$", orig_num)
         if match:
             num_part = match.group(1)
@@ -113,28 +119,26 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         else:
             inv_number = orig_num
 
-        # Partner & Krajina
+        # 2. Partner & Adresa
         partner = old_header.find('.//typ:address', NS)
         country_code = "SK"
         if partner is not None:
             c_el = partner.find('typ:country/typ:ids', NS)
             if c_el is not None: country_code = c_el.text.strip().upper()
             
-            # IČO Cleanup (Amazon link)
             ico_e = partner.find('typ:ico', NS)
             if ico_e is not None and ico_e.text:
                 if any(x in ico_e.text.lower() for x in ["http", "www.", "amazon"]):
                     partner.remove(ico_e)
-                    invalid_msgs.append(f"FA {inv_number}: Odstránené neplatné IČO (internetový odkaz)")
+                    invalid_msgs.append(f"FA {inv_number}: Odstránené neplatné IČO (link)")
                     ico_e = None
             
-            # Adresa Warning
             for f, n in [('name','Meno'), ('city','Mesto'), ('street','Ulica'), ('zip','PSČ')]:
                 el = partner.find(f'typ:{f}', NS)
                 if el is None or not el.text or not el.text.strip():
                     invalid_msgs.append(f"FA {inv_number}: Neúplná adresa (chýba {n})")
 
-        # Nová faktúra
+        # 3. Tvorba XML
         item_id = f"{pack_id} ({i:03d})"
         new_item = ET.SubElement(new_root, f'{{{NS["dat"]}}}dataPackItem', {'version': '2.0', 'id': item_id})
         new_invoice = ET.SubElement(new_item, f'{{{NS["inv"]}}}invoice', {'version': '2.0', 'xmlns:inv': NS['inv']})
@@ -162,9 +166,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         cvat = ET.SubElement(new_header, f'{{{NS["inv"]}}}classificationVAT')
         
         if rada == 'VF':
-            # BEZPEČNÝ PRÍSTUP K MAPOVALU (zabraňuje KeyError)
-            is_goods = goods_selection.get(orig_num, False)
-            ET.SubElement(acc, f'{{{NS["typ"]}}}ids').text = 'pred.tovaru' if is_goods else 'pred.služ'
+            ET.SubElement(acc, f'{{{NS["typ"]}}}ids').text = 'pred.tovaru' if is_this_item_goods else 'pred.služ'
             ET.SubElement(cvat, f'{{{NS["typ"]}}}ids').text = 'UN' if country_code == 'SK' else 'UD'
         else:
             ET.SubElement(acc, f'{{{NS["typ"]}}}ids').text = 'pred.tovaru' if rada == 'VFB' else 'pred.tov.DE'
@@ -202,7 +204,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         ET.SubElement(bnk, f'{{{NS["typ"]}}}bankCode').text = bank_code
         ET.SubElement(new_header, f'{{{NS["inv"]}}}symConst').text = sym_const
 
-        # Likvidácia a Sumáre
+        # Sumáre
         old_sum_node = old_invoice.find('inv:invoiceSummary', NS)
         h_sum, f_sum, is_f = 0.0, 0.0, False
         c_ids, c_rate = "EUR", 1.0
@@ -264,11 +266,11 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
                             pv = oc.find(f'typ:{pt}', NS)
                             if pv is not None: ET.SubElement(nc, f'{{{NS["typ"]}}}{pt}').text = pv.text
                     
+                    # Nastavenie predkontácie pre radu VF (bezpečne)
                     if rada == 'VF':
-                        is_goods = goods_selection.get(orig_num, False)
-                        ET.SubElement(ET.SubElement(new_it, f'{{{NS["inv"]}}}accounting'), f'{{{NS["typ"]}}}ids').text = 'pred.tovaru' if is_goods else 'pred.služ'
+                        ET.SubElement(ET.SubElement(new_it, f'{{{NS["inv"]}}}accounting'), f'{{{NS["typ"]}}}ids').text = 'pred.tovaru' if is_this_item_goods else 'pred.služ'
 
-        # Sumár
+        # Finálny sumár
         s_attrs = {'xmlns:rsp': NS['rsp'], 'xmlns:rdc': NS['rdc'], 'xmlns:typ': NS['typ'], 'xmlns:ftr': NS['ftr'], 'xmlns:lst': NS['lst']}
         ns_sum = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceSummary', s_attrs)
         ET.SubElement(ns_sum, f'{{{NS["inv"]}}}roundingDocument').text = 'none'
@@ -321,13 +323,12 @@ u_file = st.file_uploader("Nahrajte zdrojové XML", type=["xml"])
 if u_file is not None:
     content = u_file.getvalue()
     
-    # ŠPECIÁLNA SEKCIA LEN PRE RADU VF
     if rada_sel == 'VF':
         st.subheader("📋 Klasifikácia faktúr rady VF")
         st.info("Označte faktúry s TOVAROM. Neoznačené budú mať predkontáciu 'pred.služ'.")
         inv_list = get_invoice_list(io.BytesIO(content))
         for entry in inv_list:
-            # Ukladáme do mapy s bezpečným kľúčom
+            # Bezpečné priradenie do session_state
             st.session_state.vf_goods_map[entry['id']] = st.checkbox(
                 f"FA {entry['id']} | {entry['text']}", key=f"check_{entry['id']}"
             )
@@ -335,7 +336,6 @@ if u_file is not None:
 
     if st.button("🚀 Spustiť transformáciu", type="primary"):
         with st.spinner('Spracovávam...'):
-            # Vždy posielame mapu, transform_xml ju pre VFB/VFD bezpečne odignoruje
             xml_data, errors, count, out_fn = transform_xml(
                 io.BytesIO(content), rada_sel, d_days, b_ids, b_acc, b_code, p_type, s_const, 
                 st.session_state.vf_goods_map
