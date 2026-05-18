@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import io
 import re
+import os
 
 # ==========================================
 # KONFIGURÁCIA A MENNÉ PRIESTORY POHODY
@@ -90,7 +91,6 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         inv_number_elem = old_header.find('inv:number/typ:numberRequested', NS)
         orig_num = inv_number_elem.text.strip() if inv_number_elem is not None else "0"
         
-        # Formátovanie čísla
         match = re.search(r"(\d+)$", orig_num)
         if match:
             num_part = match.group(1)
@@ -106,23 +106,20 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         partner = old_header.find('.//typ:address', NS)
         country_code = "SK"
         if partner is not None:
-            # Krajina pre DPH
             country_el = partner.find('typ:country/typ:ids', NS)
             if country_el is not None: country_code = country_el.text.strip().upper()
 
-            # IČO Amazon link check
             ico_e = partner.find('typ:ico', NS)
             if ico_e is not None and ico_e.text:
                 if any(x in ico_e.text.lower() for x in ["http", "www.", "amazon"]):
                     partner.remove(ico_e)
-                    invalid_msgs.append(f"FA {inv_number}: Odstránené neplatné IČO (internetový odkaz)")
+                    invalid_msgs.append(f"FA {inv_number}: Odstránené neplatné IČO (link)")
                     ico_e = None
             
             comp = partner.find('typ:company', NS)
             if comp is not None and comp.text and comp.text.strip() and ico_e is None:
                 invalid_msgs.append(f"FA {inv_number} (Firma: {comp.text.strip()})")
 
-            # Adresa check
             for f, n in [('name','Meno'), ('city','Mesto'), ('street','Ulica'), ('zip','PSČ')]:
                 el = partner.find(f'typ:{f}', NS)
                 if el is None or not el.text or not el.text.strip():
@@ -135,14 +132,12 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         new_header = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceHeader', {'xmlns:typ': NS['typ']})
         
         ET.SubElement(new_header, f'{{{NS["inv"]}}}invoiceType').text = 'issuedInvoice'
-        
         new_num_node = ET.SubElement(new_header, f'{{{NS["inv"]}}}number')
         ET.SubElement(new_num_node, f'{{{NS["typ"]}}}numberRequested').text = inv_number
         
         old_sym = old_header.find('inv:symVar', NS)
         ET.SubElement(new_header, f'{{{NS["inv"]}}}symVar').text = old_sym.text if old_sym is not None else inv_number
         
-        # Dátumy
         date_val = old_header.find('inv:date', NS).text
         try:
             date_due_val = (datetime.strptime(date_val, "%Y-%m-%d") + timedelta(days=due_days)).strftime("%Y-%m-%d")
@@ -303,9 +298,12 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
 # STREAMLIT UI
 # ==========================================
 st.set_page_config(page_title="Pohoda XML Transform", page_icon="📝", layout="wide")
-st.title("📦 XML Transformátor (Multi-Source -> Pohoda)")
 
 with st.sidebar:
+    # --- PRIDANÉ LOGO ---
+    if os.path.exists("eppobrands.png"):
+        st.image("eppobrands.png", use_container_width=True)
+    
     st.header("⚙️ Nastavenia")
     rada_sel = st.radio("Dokladová rada:", ('VFB', 'VFD', 'VF'))
     st.markdown("---")
@@ -317,6 +315,8 @@ with st.sidebar:
     s_const = st.text_input("Konštantný symbol", "0308")
     d_days = st.number_input("Splatnosť (dni)", 7)
 
+st.title("📦 XML Transformátor (Multi-Source -> Pohoda)")
+
 u_file = st.file_uploader("Nahrajte zdrojové XML", type=["xml"])
 
 if u_file is not None:
@@ -324,7 +324,7 @@ if u_file is not None:
     
     if rada_sel == 'VF':
         st.subheader("📋 Klasifikácia faktúr rady VF")
-        st.info("Označte faktúry, ktoré obsahujú TOVAR. Neoznačené budú importované ako SLUŽBY.")
+        st.info("Označte faktúry, ktoré obsahujú TOVAR. Neoznačené budú importované s predkontáciou 'pred.služ'.")
         inv_list = get_invoice_list(io.BytesIO(file_content))
         
         for entry in inv_list:
@@ -341,6 +341,7 @@ if u_file is not None:
             )
             st.session_state.transformed_xml = xml_data
             st.session_state.errors = errors
+            st.session_state.count = count
             st.session_state.out_filename = out_fn
 
 if st.session_state.transformed_xml is not None:
