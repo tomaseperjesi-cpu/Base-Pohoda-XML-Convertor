@@ -29,12 +29,12 @@ for prefix, uri in NS.items():
     ET.register_namespace(prefix, uri)
 
 # Inicializácia Session State
-if 'vf_goods_map' not in st.session_state:
-    st.session_state.vf_goods_map = {}
 if 'transformed_xml' not in st.session_state:
     st.session_state.transformed_xml = None
 if 'errors' not in st.session_state:
     st.session_state.errors = []
+if 'vf_goods_map' not in st.session_state:
+    st.session_state.vf_goods_map = {}
 if 'last_file_hash' not in st.session_state:
     st.session_state.last_file_hash = None
 
@@ -105,7 +105,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         inv_num_el = old_header.find('inv:number/typ:numberRequested', NS)
         orig_num = inv_num_el.text.strip() if inv_num_el is not None else "0"
         
-        # Ošetrenie formátu čísla
+        # Formátovanie čísla
         match = re.search(r"(\d+)$", orig_num)
         if match:
             num_part = match.group(1)
@@ -135,7 +135,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
                 if el is None or not el.text or not el.text.strip():
                     invalid_msgs.append(f"FA {inv_number}: Neúplná adresa (chýba {n})")
 
-        # Nová Štruktúra
+        # Nová faktúra
         item_id = f"{pack_id} ({i:03d})"
         new_item = ET.SubElement(new_root, f'{{{NS["dat"]}}}dataPackItem', {'version': '2.0', 'id': item_id})
         new_invoice = ET.SubElement(new_item, f'{{{NS["inv"]}}}invoice', {'version': '2.0', 'xmlns:inv': NS['inv']})
@@ -163,7 +163,7 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
         cvat = ET.SubElement(new_header, f'{{{NS["inv"]}}}classificationVAT')
         
         if rada == 'VF':
-            # BEZPEČNÁ KONTROLA: Ak orig_num nie je v mape, vráti False (služba)
+            # BEZPEČNÁ KONTROLA CEZ SESSION STATE (zabraňuje KeyError)
             is_goods = st.session_state.vf_goods_map.get(orig_num, False)
             ET.SubElement(acc, f'{{{NS["typ"]}}}ids').text = 'pred.tovaru' if is_goods else 'pred.služ'
             ET.SubElement(cvat, f'{{{NS["typ"]}}}ids').text = 'UN' if country_code == 'SK' else 'UD'
@@ -184,7 +184,6 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
             partner.set('linkToAddress', 'true' if partner.find('typ:ico', NS) is not None else 'false')
             ET.SubElement(new_header, f'{{{NS["inv"]}}}partnerIdentity').append(partner)
 
-        # Moja identita
         my_addr = ET.SubElement(ET.SubElement(new_header, f'{{{NS["inv"]}}}myIdentity'), f'{{{NS["typ"]}}}address')
         ET.SubElement(my_addr, f'{{{NS["typ"]}}}company').text = 'EPPO BRANDS s. r. o.'
         ET.SubElement(my_addr, f'{{{NS["typ"]}}}city').text = 'Zvolen'
@@ -267,11 +266,11 @@ def transform_xml(file_bytes, rada, due_days, bank_ids, bank_acc, bank_code, pay
                             if pv is not None: ET.SubElement(nc, f'{{{NS["typ"]}}}{pt}').text = pv.text
                     
                     if rada == 'VF':
-                        # OPÄŤ BEZPEČNÁ KONTROLA PRE POLOŽKU
+                        # OPÄŤ BEZPEČNÁ KONTROLA CEZ SESSION STATE
                         is_goods = st.session_state.vf_goods_map.get(orig_num, False)
                         ET.SubElement(ET.SubElement(new_it, f'{{{NS["inv"]}}}accounting'), f'{{{NS["typ"]}}}ids').text = 'pred.tovaru' if is_goods else 'pred.služ'
 
-        # Sumár
+        # Finálny sumár
         s_attrs = {'xmlns:rsp': NS['rsp'], 'xmlns:rdc': NS['rdc'], 'xmlns:typ': NS['typ'], 'xmlns:ftr': NS['ftr'], 'xmlns:lst': NS['lst']}
         ns_sum = ET.SubElement(new_invoice, f'{{{NS["inv"]}}}invoiceSummary', s_attrs)
         ET.SubElement(ns_sum, f'{{{NS["inv"]}}}roundingDocument').text = 'none'
@@ -322,11 +321,12 @@ st.title("📦 XML Transformátor (Multi-Source -> Pohoda)")
 u_file = st.file_uploader("Nahrajte zdrojové XML", type=["xml"])
 
 if u_file is not None:
-    # Kontrola zmeny súboru (ak nahráte iný súbor, vymaže sa mapa zaškrtnutí)
+    # Reset pamäte ak sa zmení súbor
     current_hash = hash(u_file.name)
     if st.session_state.last_file_hash != current_hash:
         st.session_state.vf_goods_map = {}
         st.session_state.last_file_hash = current_hash
+        st.session_state.transformed_xml = None
 
     content = u_file.getvalue()
     
@@ -346,6 +346,7 @@ if u_file is not None:
 
     if st.button("🚀 Spustiť transformáciu", type="primary"):
         with st.spinner('Spracovávam...'):
+            # Voláme funkciu s fixným počtom 8 argumentov
             xml_data, errors, count, out_fn = transform_xml(
                 io.BytesIO(content), rada_sel, d_days, b_ids, b_acc, b_code, p_type, s_const
             )
